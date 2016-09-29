@@ -1,5 +1,6 @@
 package de.uni_freiburg.es.sensorrecordingtool;
 
+import android.app.Instrumentation;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -7,10 +8,10 @@ import android.content.IntentFilter;
 import android.hardware.Sensor;
 import android.os.BatteryManager;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
+import android.os.Environment;
 import android.support.test.InstrumentationRegistry;
 import android.support.test.runner.AndroidJUnit4;
+import android.support.v4.content.LocalBroadcastManager;
 import android.test.suitebuilder.annotation.MediumTest;
 
 import org.junit.After;
@@ -21,6 +22,7 @@ import org.junit.runner.RunWith;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.Date;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -71,15 +73,15 @@ public class RecordingTest {
         String result = callForResult(i);
         Assert.assertNotNull("timeout before completion", result);
 
-        assertRecording(result, "accelerometer", 100 * (3) * 4 * 5);
+        assertRecording(result, "accelerometer", 100 * (3 + 1) * 4 * 5);
     }
 
      @Test public void doMultipleSensors() throws InterruptedException {
         i.putExtra(Recorder.RECORDER_INPUT, new String[]{
-                "acc",
-                "gyr",
-                "mag",
-                "rot"
+                Sensor.STRING_TYPE_ACCELEROMETER,
+                Sensor.STRING_TYPE_GYROSCOPE,
+                Sensor.STRING_TYPE_MAGNETIC_FIELD,
+                Sensor.STRING_TYPE_ROTATION_VECTOR
         });
         i.putExtra("-d", 6.0f);
         i.putExtra("-r", 40);
@@ -89,18 +91,18 @@ public class RecordingTest {
         String result = callForResult(i);
         Assert.assertNotNull("timeout", result);
 
-        assertRecording(result, "acc", 40 * (3) * 4 * 6);
-        assertRecording(result, "gyr", 40 * (3) * 4 * 6);
-        assertRecording(result, "mag", zeroWhenOnGradle(40 * (3) * 4 * 6));
-        assertRecording(result, "rot", 40 * (5) * 4 * 6);
+        assertRecording(result, Sensor.STRING_TYPE_ACCELEROMETER, 40 * (3 + 1) * 4 * 6);
+        assertRecording(result, Sensor.STRING_TYPE_GYROSCOPE, 40 * (3 + 1) * 4 * 6);
+        assertRecording(result, Sensor.STRING_TYPE_MAGNETIC_FIELD, zeroWhenOnGradle(40 * (3 + 1) * 4 * 6));
+        assertRecording(result, Sensor.STRING_TYPE_ROTATION_VECTOR, 40 * (5+1) * 4 * 6);
     }
 
     @Test public void doMultipleSensorsAndRates() throws InterruptedException {
         i.putExtra(Recorder.RECORDER_INPUT, new String[]{
-                "acc",
-                "gyr",
-                "mag",
-                "rot"
+                Sensor.STRING_TYPE_ACCELEROMETER,
+                Sensor.STRING_TYPE_GYROSCOPE,
+                Sensor.STRING_TYPE_MAGNETIC_FIELD,
+                Sensor.STRING_TYPE_ROTATION_VECTOR
         });
         i.putExtra("-d", 5.0);
         i.putExtra("-r", new double[]{25.0, 50.0, 75.0, 100.0});
@@ -108,42 +110,19 @@ public class RecordingTest {
         String result = callForResult(i);
         Assert.assertNotNull("timeout", result);
 
-        assertRecording(result, "acc", 25 * (3) * 4 * 5);
-        assertRecording(result, "gyr", 50*(3)*4*5);
-        assertRecording(result, "mag", zeroWhenOnGradle(75*(3)*4*5));
-        assertRecording(result, "rot", 100*(5)*4*5);
+        assertRecording(result, Sensor.STRING_TYPE_ACCELEROMETER, 25 * (3+1) * 4 * 5);
+        assertRecording(result, Sensor.STRING_TYPE_GYROSCOPE, 50*(3+1)*4*5);
+        assertRecording(result, Sensor.STRING_TYPE_MAGNETIC_FIELD, zeroWhenOnGradle(75*(3+1)*4*5));
+        assertRecording(result, Sensor.STRING_TYPE_ROTATION_VECTOR, 100*(5+1)*4*5);
     }
 
     @Test public void doLocationTest() throws InterruptedException {
         i.putExtra(Recorder.RECORDER_INPUT, "location");
         i.putExtra("-d", 5.0);
         String result = callForResult(i);
-        Assert.assertNotNull("timed out", result);
+        Assert.assertNotNull("timeout", result);
 
-        assertRecording(result, "location", 50*(4)*4*5);
-    }
-
-    @Test public void doInfiniteRecordingTest() throws InterruptedException {
-        i.putExtra("-d", -1);
-        i.putExtra("-i", "acc");
-
-        /* send a cancel request after five seconds */
-        Handler h = new Handler(c.getMainLooper());
-        h.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                Intent cancel = new Intent(Recorder.CANCEL_ACTION);
-                c.sendBroadcast(cancel);
-            }
-        }, 5000);
-
-        String result = callForResult(i);
-        Assert.assertNotNull("timed out", result);
-
-        File path = new File(new File(result), "acc");
-        Assert.assertTrue("no output file ", path.exists());
-        Assert.assertTrue(String.format("at least 5 seconds (%d)", path.length()),
-                          path.length() > 50*3*4*5);
+        assertRecording(result, "location", 50*(4+1)*4*5);
     }
 
     /* we assume that some models are residing on their magnetized charging gradle while plugged

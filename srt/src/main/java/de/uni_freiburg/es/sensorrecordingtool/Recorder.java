@@ -1,10 +1,21 @@
 package de.uni_freiburg.es.sensorrecordingtool;
 
+import android.Manifest;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.support.annotation.Nullable;
+import android.support.v4.app.NotificationCompat;
+import android.support.v4.app.NotificationManagerCompat;
+import android.support.v4.content.ContextCompat;
 import android.util.Log;
 
 import java.io.BufferedOutputStream;
@@ -19,12 +30,10 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.TimeZone;
 
-import de.uni_freiburg.es.intentforwarder.ForwardedUtils;
 import de.uni_freiburg.es.sensorrecordingtool.sensors.Sensor;
-import de.uni_freiburg.es.sensorrecordingtool.sensors.SensorEvent;
-import de.uni_freiburg.es.sensorrecordingtool.sensors.SensorEventListener;
 
 /**
  * A tool for recording arbitrary combinations of sensor attached and reachable via Android. The
@@ -33,39 +42,12 @@ import de.uni_freiburg.es.sensorrecordingtool.sensors.SensorEventListener;
  * if you would want to record the accelerometer and the orientation at 50Hz you can do so with
  * the following Intent:
  *
- *      Intent i = new Intent(Recorder.RECORD_ACTION);
- *      i.putString('-i', ['accelerometer', 'orientation']);
- *      i.putFloat('-r', 50.0);
- *      sendBroadcast(i);
+ *     Intent i = new Intent();
+ *     i.putString('-i', ['accelerometer', 'orientation']);
+ *     i.putFloat('-r', 50.0);
+ *     sendBroadcast(i);
  *
  *  or from the adb shell:
- *
- *      adb shell am broadcast -a senserec -e -i accelerometer
- *
- *   Supported arguments are:
- *
- *     -i [String or list of String]
- *        sensors to record, providing an unknown one will print a list on logcat
- *
- *     -r [int/float or list of int/float]
- *        recording rate of each input, or if only a single value is given the rate for all sensors
- *
- *     -o [String]
- *        output directory under /sdcard/DCIM under which the recordings are stored
- *
- *     -f [single string or list of strings]
- *        list of string specifying the sensor format for each input, null to use the default,
- *        currently only the video sensor has any specs, which is the recording size given as
- *        widthxheight, e.g. 1280x720.
- *
- *   A Broadcast Intent is sent once the recording is started or canceled. The latest recording
- *   can be canceled with the senserec_cancel broadcast action, e.g.:
- *
- *      adb shell am broadcast -a senserec_cancel
- *
- *   it is also possible to cancel a specific recording by supplying its id:
- *
- *      adb shell am broadcast -a senserec_cancel -r <id>
  *
  * Created by phil on 2/22/16.
  */
@@ -90,11 +72,8 @@ public class Recorder extends Service {
     /* the optional output path */
     static final String RECORDER_OUTPUT = "-o";
 
-    /* optional format specifier for each sensor */
-    static final String RECORDER_FORMAT = "-f";
-
     /* the main action for recording */
-    public static final String RECORD_ACTION = ForwardedUtils.RECORD_ACTION;
+    public static final String RECORD_ACTION = "senserec";
 
     /* action for reporting error from the recorder service */
     static final String ERROR_ACTION  = "recorder_error";
@@ -103,11 +82,11 @@ public class Recorder extends Service {
     static final String FINISH_PATH   = "recording_path";
 
     /* for handing over the cancel action from a notification */
-    public static final String CANCEL_ACTION = "senserec_cancel";
-    public static final String RECORDING_ID = "-r";
+    static final String CANCEL_ACTION = "cancel";
+    static final String RECORDING_ID = "-r";
 
     /* keep track of all running recordings */
-    private LinkedList<Recording> mRecordings = new LinkedList<Recording>();
+    private LinkedList<Recording> mRecordings = new LinkedList<>();
 
     /** called with the startService routine, will parse all RECORDER_INPUTs for known values
      *  and start the recording. If no RECORDER_OUTPUT directory is given it will default to
@@ -116,10 +95,9 @@ public class Recorder extends Service {
     @Override
     public int onStartCommand(Intent i, int flags, int startId) {
         String[] sensors = i.getStringArrayExtra(RECORDER_INPUT);
-        String[] formats = i.getStringArrayExtra(RECORDER_FORMAT);
         String output    = i.getStringExtra(RECORDER_OUTPUT);
         double[] rates   = getIntFloatOrDoubleArray(i, RECORDER_RATE, 50.);
-        double duration  = getIntFloatOrDouble(i, RECORDER_DURATION, -1);
+        double duration  = getIntFloatOrDouble(i, RECORDER_DURATION, 5.);
 
         if (i == null)
             return START_NOT_STICKY;
@@ -128,6 +106,7 @@ public class Recorder extends Service {
          * make sure that we have permission to write the external folder, if we do not have
          * permission currently the user will be bugged about it. And this service will be
          * restarted with a null action intent.
+         */
         if (!PermissionDialog.externalStorage(this)) {
             Intent diag = new Intent(this, PermissionDialog.class);
             if (i.getExtras() != null)
@@ -136,28 +115,26 @@ public class Recorder extends Service {
             startActivity(diag);
             return START_NOT_STICKY;
         }
-         */
 
         /*
          * terminate the recording right now, if the user wishes so.
          */
         if (CANCEL_ACTION.equals(i.getAction())) {
-            int id = i.getIntExtra(RECORDING_ID, mRecordings.size()-1);
+            int id = i.getIntExtra(RECORDING_ID, -1);
 
             try {
                 Notification.cancelRecording(this, id);
 
-                if (id < 0 || id >= mRecordings.size()) {
-                    Log.d(TAG, "invalid recording id " + id);
-                    return START_NOT_STICKY;
+                Recording r = mRecordings.get(id);
+                for( Iterator<SensorProcess> it = r.mInputList.iterator(); it.hasNext(); ) {
+                    SensorProcess p = it.next();
+                    p.terminate();
                 }
-
-                /* flush instead of terminating to get all sensor data up until now */
-                mRecordings.get(id).mCallFlush.run();
-                mRecordings.remove(id);
                 Log.d(TAG, "terminated recording " + id);
             } catch(IndexOutOfBoundsException e) {
                 Log.d(TAG, "unable to find recording with id " + id);
+            } catch (IOException e) {
+                e.printStackTrace();
             }
 
             return START_NOT_STICKY;
@@ -177,23 +154,6 @@ public class Recorder extends Service {
 
         if (sensors == null)
             return error("no input supplied");
-
-        /*
-         * check for optional format specifier
-         */
-        if (formats == null && i.getStringExtra(RECORDER_FORMAT)!=null)
-            formats = new String[] {i.getStringExtra(RECORDER_FORMAT)};
-
-        if (formats == null)
-            formats = new String[sensors.length];
-
-        if (formats.length != sensors.length) {
-            String[] fmts = new String[sensors.length];
-            Arrays.fill(fmts, null);
-            for (int j=0; j<formats.length; j++)
-                fmts[j] = formats[j];
-            formats = fmts;
-        }
 
         /*
          * convert a single rate to an array, convert a single element array to a length
@@ -224,31 +184,24 @@ public class Recorder extends Service {
          * duration. And create the output folder beforehand.
          */
         assert(rates.length==sensors.length);
-        assert(formats.length==sensors.length);
 
         Recording r = new Recording(output, duration);
         for (int j=0; j<rates.length; j++) {
             try {
                 BufferedOutputStream bf =  new BufferedOutputStream(
                         new FileOutputStream(new File(output, sensors[j])));
-
-                SensorProcess sp;
-
-                if (sensors[j].contains("video") || sensors[j].contains("audio"))
-                    sp = new BlockSensorProcess(sensors[j], rates[j], formats[j], duration, bf);
-                else
-                    sp = new SensorProcess(sensors[j], rates[j], formats[j], duration, bf);
-
+                SensorProcess sp = new SensorProcess(sensors[j], rates[j], duration, bf);
                 r.add(sp);
             } catch (Exception e) {
                 error(sensors[j] + ": " + e.getLocalizedMessage());
-                e.printStackTrace();
                 /* we do best effort recordings */
             }
         }
-
         mRecordings.add(r);
-        /** create the notification. */
+
+        /*
+         * create the notification.
+         */
         Notification.newRecording(this, mRecordings.indexOf(r), r);
 
         return START_NOT_STICKY;
@@ -270,7 +223,7 @@ public class Recorder extends Service {
         }
 
         if (iarr != null) {
-            double out[] = new double[iarr.length];
+            double out[] = new double[farr.length];
             for (int j=0; j<out.length; j++)
                 out[j] = iarr[j];
             return out;
@@ -296,6 +249,7 @@ public class Recorder extends Service {
         return def;
     }
 
+    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
@@ -335,6 +289,7 @@ public class Recorder extends Service {
     protected class SensorProcess implements SensorEventListener {
         public static final int LATENCY_US = 5 * 60 * 1000 * 1000;
         final Sensor mSensor;
+        float mAccuracy = SensorManager.SENSOR_STATUS_ACCURACY_LOW;
         final double mRate;
         final BufferedOutputStream mOut;
         final double mDur;
@@ -343,19 +298,17 @@ public class Recorder extends Service {
         double mDiff = 0;
         double mElapsed = 0;
 
-        public SensorProcess(String sensor, double rate, String format, double dur,
+        public SensorProcess(String sensor, double rate, double dur,
                              BufferedOutputStream bf) throws Exception  {
             mRate = rate;
             mDur = dur;
             mOut = bf;
 
-            int maxreportdelay_us = LATENCY_US;
-            if ( mDur > 0 && (int) mDur * 1000 * 1000 / 2 < LATENCY_US )
-                maxreportdelay_us = (int) mDur * 1000 * 1000 / 2;
+            int maxreportdelay_us = Math.min((int) mDur * 1000 * 1000 / 2, LATENCY_US);
 
             /* TODO setting maxreport to 5minutes can get problematic later for ffmpeg */
             mSensor = getMatchingSensor(sensor);
-            mSensor.registerListener(this, (int) (1 / rate * 1000 * 1000), maxreportdelay_us, format);
+            mSensor.registerListener(this, (int) (1 / rate * 1000 * 1000), maxreportdelay_us);
         }
 
         /** given a String tries to find a matching sensor given these rules:
@@ -371,7 +324,7 @@ public class Recorder extends Service {
          * @throws Exception when no or multiple matches are found
          */
         public Sensor getMatchingSensor(String sensor) throws Exception {
-            LinkedList<Sensor> candidates = new LinkedList<Sensor>();
+            LinkedList<Sensor> candidates = new LinkedList<>();
 
             for (Sensor s : Sensor.getAvailableSensors(getApplicationContext()))
                 if (s.getStringType().toLowerCase().contains(sensor.toLowerCase()))
@@ -412,6 +365,9 @@ public class Recorder extends Service {
 
         @Override
         public void onSensorChanged(SensorEvent sensorEvent) {
+            if (mBuf == null)
+                mBuf = ByteBuffer.allocate(sensorEvent.values.length * 4 + 1 * 4 );
+
             if (mLastTimestamp == -1) {
                 mLastTimestamp = sensorEvent.timestamp;
                 return;
@@ -429,7 +385,10 @@ public class Recorder extends Service {
                 /*
                  * transfer a sensor sample and the current accuracy measure
                  */
-                byte[] arr = transfer(sensorEvent);
+                mBuf.clear();
+                for (float v : sensorEvent.values)
+                    mBuf.putFloat(v);
+                mBuf.putFloat(mAccuracy);
 
                 /*
                  * store it or multiple copies of the same, close when done.
@@ -438,11 +397,11 @@ public class Recorder extends Service {
                     mDiff -= 1 / mRate;
                     mElapsed += 1 / mRate;
 
-                    if (mDur > 0 && mElapsed > mDur+.5/mRate) {
+                    if (mElapsed > mDur+.5/mRate) {
                         terminate();
                         return;
                     } else
-                        mOut.write(arr);
+                        mOut.write(mBuf.array());
                 }
 
                 mLastTimestamp = sensorEvent.timestamp;
@@ -451,33 +410,15 @@ public class Recorder extends Service {
             }
         }
 
-        public byte[] transfer(SensorEvent sensorEvent) {
-            if (mBuf == null)
-                mBuf = ByteBuffer.allocate(sensorEvent.values.length * 4);
-            else
-                mBuf.clear();
 
-            for (float v : sensorEvent.values)
-                mBuf.putFloat(v);
-
-            return mBuf.array();
+        @Override
+        public void onAccuracyChanged(android.hardware.Sensor sensor, int i) {
+            mAccuracy = (float) i;
         }
 
         private void terminate() throws IOException {
             mSensor.unregisterListener(this);
             mOut.close();
-        }
-    }
-
-    protected class BlockSensorProcess extends SensorProcess {
-        public BlockSensorProcess(String sensor, double rate, String format, double dur,
-                                  BufferedOutputStream bf) throws Exception {
-            super(sensor, rate, format, dur, bf);
-        }
-
-        @Override
-        public byte[] transfer(SensorEvent sensorEvent) {
-            return sensorEvent.rawdata;
         }
     }
 
@@ -499,8 +440,7 @@ public class Recorder extends Service {
              * afterwards. This is to avoid sensor that do not report data continuously. For example
              * in the case of a failure condition */
             mTimeout = new Handler();
-            if (duration > 0)
-                mTimeout.postDelayed(mCallFlush, (long) (duration*1000) + 2000);
+            mTimeout.postDelayed(mCallFlush, (long) (duration*1000) + 2000);
         }
 
         public void add(SensorProcess s) {
@@ -520,12 +460,8 @@ public class Recorder extends Service {
 
             Intent i = new Intent(FINISH_ACTION);
             i.putExtra(FINISH_PATH, mOutputPath);
-            i.putExtra(RECORDING_ID, mRecordings.indexOf(this));
             sendBroadcast(i);
-            mRecordings.remove(this);
-
-            if (mwl.isHeld())
-                mwl.release();
+            mwl.release();
         }
 
 

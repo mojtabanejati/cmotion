@@ -1,8 +1,10 @@
 package es.uni_freiburg.de.cmotion;
 
 import android.app.Activity;
-import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -12,14 +14,13 @@ import android.os.Handler;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.ArrayAdapter;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.api.GoogleApiClient;
-import com.google.android.gms.common.api.PendingResult;
 import com.google.android.gms.common.api.ResultCallback;
-import com.google.android.gms.wearable.MessageApi;
 import com.google.android.gms.wearable.Node;
 import com.google.android.gms.wearable.NodeApi;
 import com.google.android.gms.wearable.Wearable;
@@ -27,12 +28,15 @@ import com.google.android.gms.wearable.Wearable;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
-public class CMotionWearActivity extends Activity implements GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener, SensorEventListener {
+public class CMotionWearActivity extends Activity  implements GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener, SensorEventListener{
+
+
 
     private static final String MESSAGE_API_PATH = "ROTATION_VECTOR_MESSAGE";
     private static final String TAG = CMotionWearActivity.class.getName();
     private ProgressBar mProgressBar;
     private TextView mLargeText;
+
     private GoogleApiClient mApiClient;
     private SensorManager mSensorManager;
     private String mTargetNode = null;
@@ -40,10 +44,18 @@ public class CMotionWearActivity extends Activity implements GoogleApiClient.Con
     private TextView mMediumText;
     private long mCounter = 0;
     private long mStarttime;
-    private int mOutstandig = 0;
+
+
+    public static final String BROADCAST = "CMOTION.android.action.broadcast";
+
+
+    private static final String WEAR_MESSAGE_PATH = "/message";
+    private ArrayAdapter<String> mAdapter;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_cmotion_wear);
         mProgressBar = (ProgressBar) findViewById(R.id.progress);
@@ -51,11 +63,7 @@ public class CMotionWearActivity extends Activity implements GoogleApiClient.Con
         mMediumText = (TextView) findViewById(R.id.medtext);
         mStarttime = System.currentTimeMillis();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-    }
-
-    @Override
-    protected void onResume() {
-        /*
+ /*
          * initialize a wearable connection
          */
         mApiClient = new GoogleApiClient.Builder(this)
@@ -65,27 +73,87 @@ public class CMotionWearActivity extends Activity implements GoogleApiClient.Con
                 .build();
         mApiClient.connect();
 
+          /*
+         * register a sensor listener for the local sensors
+         */
+        mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        mSensorManager.registerListener(this,
+                mSensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR),
+                SensorManager.SENSOR_DELAY_GAME, 0);
+
+
+        IntentFilter filter = new IntentFilter(BROADCAST);
+        registerReceiver(myReceiver,filter);
+
+    }
+
+        private final BroadcastReceiver myReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent.getAction().equals(BROADCAST)) {
+
+                    if (intent.hasExtra("on pause")) {
+                        mApiClient.disconnect();
+                        finish();
+                    }
+
+
+                    }  if (intent.hasExtra("on play")) {
+                            if (!mApiClient.isConnected()) {
+                            mApiClient.connect();
+                                finish();
+                }
+                }
+            }
+        };
+
+    @Override
+    protected void onResume() {
+
         /*
          * register a sensor listener for the local sensors
          */
         mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         mSensorManager.registerListener(this,
                 mSensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR),
-                20*1000, 0);
+                SensorManager.SENSOR_DELAY_GAME, 0);
+       /*
+        *
+        * register BroadcastReceiver
+        */
+
+        IntentFilter filter = new IntentFilter(BROADCAST);
+        registerReceiver(myReceiver,filter);
+
+
 
         mHandler = new Handler();
         super.onResume();
     }
 
+
     @Override
     protected void onPause() {
         mSensorManager.unregisterListener(this);
         mApiClient.disconnect();
+
+
+        /*
+        unregister BroadcastReceiver
+         */
+        unregisterReceiver(myReceiver);
+
+        mMediumText.setText("no target");
+        mLargeText.setText("");
+        mProgressBar.setVisibility(View.GONE);
+
         super.onPause();
     }
 
     @Override
     public void onConnected(Bundle bundle) {
+
+
         Wearable.NodeApi.getConnectedNodes(mApiClient).setResultCallback(
                 new ResultCallback<NodeApi.GetConnectedNodesResult>() {
                     @Override
@@ -139,25 +207,14 @@ public class CMotionWearActivity extends Activity implements GoogleApiClient.Con
 
         float[] rot = new float[4];
         SensorManager.getQuaternionFromVector(rot, sensorEvent.values);
-        if (mOutstandig < 3) {
-            PendingResult<MessageApi.SendMessageResult> result;
-            result = Wearable.MessageApi.sendMessage(mApiClient, mTargetNode, MESSAGE_API_PATH,
-                    ByteBuffer.allocate(4 * 5).order(ByteOrder.LITTLE_ENDIAN)
-                            .putInt((int) (System.currentTimeMillis() - mStarttime))
-                            .putFloat(rot[0]) // q
-                            .putFloat(rot[1]) // x
-                            .putFloat(rot[2]) // y
-                            .putFloat(rot[3]) // z
-                            .array());
-
-            result.setResultCallback(new ResultCallback<MessageApi.SendMessageResult>() {
-                @Override
-                public void onResult(MessageApi.SendMessageResult result) {
-                    mOutstandig--;
-                }
-            });
-            mOutstandig++;
-        }
+        Wearable.MessageApi.sendMessage(mApiClient, mTargetNode, MESSAGE_API_PATH,
+                ByteBuffer.allocate(4 * 5).order(ByteOrder.LITTLE_ENDIAN)
+                        .putInt((int) (System.currentTimeMillis() - mStarttime))
+                        .putFloat(rot[0]) // q
+                        .putFloat(rot[1]) // x
+                        .putFloat(rot[2]) // y
+                        .putFloat(rot[3]) // z
+                        .array());
 
         mCounter++;
     }
@@ -166,4 +223,6 @@ public class CMotionWearActivity extends Activity implements GoogleApiClient.Con
     public void onAccuracyChanged(Sensor sensor, int accuracy) {
 
     }
+
+
 }

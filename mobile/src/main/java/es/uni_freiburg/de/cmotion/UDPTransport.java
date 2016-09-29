@@ -1,6 +1,5 @@
 package es.uni_freiburg.de.cmotion;
 
-import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -85,10 +84,10 @@ public class UDPTransport extends Thread {
             q.add(buf);
             return true;
         } catch(IllegalStateException e) {
-            System.err.println("buffer overflow");
             q.removeFirst();
             return false;
         }
     }
+
 
 }
